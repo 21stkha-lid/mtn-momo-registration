@@ -1,0 +1,17 @@
+{
+  "name": "mtn-momo-registration",
+  "version": "1.0.0",
+  "description": "MTN MoMo Registration App",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.4.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
